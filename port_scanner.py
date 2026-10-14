@@ -5,6 +5,7 @@ port_scanner.py - Multithreaded TCP port scanner.
 Features: banner grabbing, multiple hosts / CIDR ranges, hosts from a file,
 common-port preset, JSON/CSV export, optional progress bar (tqdm).
 
+Only scan systems you own or have explicit permission to test.
 """
 import argparse
 import csv
@@ -29,6 +30,17 @@ COMMON_PORTS = [
 HTTP_PORTS = {80, 8000, 8080, 8443}
 MAX_CIDR_HOSTS = 1024
 
+# Security software (antivirus mail shields, proxies) can answer connections on
+# the scanner's own machine, producing false "open" results. These words in a
+# banner are a strong hint that this happened.
+INTERCEPTOR_KEYWORDS = (
+    "avast", "avg", "kaspersky", "bitdefender", "eset", "norton",
+    "mcafee", "concurrent connection limit",
+)
+# If this share of scanned hosts all show the same port open, flag it.
+SUSPICIOUS_HOST_RATIO = 0.8
+MIN_HOSTS_FOR_RATIO = 5
+
 
 @dataclass
 class PortResult:
@@ -37,6 +49,7 @@ class PortResult:
     port: int
     service: str
     banner: str
+    suspect: bool = False
 
 
 def get_service(port: int) -> str:
@@ -71,6 +84,46 @@ def scan_port(host: str, ip: str, port: int, timeout: float, banners: bool):
             return None
         banner = grab_banner(s, host, port) if banners else ""
         return PortResult(host, ip, port, get_service(port), banner)
+
+
+def banner_looks_intercepted(banner: str) -> bool:
+    b = banner.lower()
+    return any(k in b for k in INTERCEPTOR_KEYWORDS)
+
+
+def flag_suspect_results(results, num_hosts: int) -> list[str]:
+    """Mark likely false positives and return human-readable warnings."""
+    warnings = []
+
+    # Check 1: banner mentions security software
+    for r in results:
+        if banner_looks_intercepted(r.banner):
+            r.suspect = True
+    if any(r.suspect for r in results):
+        warnings.append(
+            "Some banners mention security software (e.g. Avast). Your own "
+            "antivirus may be answering these connections, so those ports "
+            "may not really be open on the target."
+        )
+
+    # Check 2: the same port 'open' on almost every host
+    if num_hosts >= MIN_HOSTS_FOR_RATIO:
+        counts = {}
+        for r in results:
+            counts[r.port] = counts.get(r.port, 0) + 1
+        flagged = sorted(p for p, c in counts.items()
+                         if c / num_hosts >= SUSPICIOUS_HOST_RATIO)
+        if flagged:
+            for r in results:
+                if r.port in flagged:
+                    r.suspect = True
+            ports = ", ".join(map(str, flagged))
+            warnings.append(
+                f"Port(s) {ports} appear open on {int(SUSPICIOUS_HOST_RATIO * 100)}%+ "
+                "of hosts. Real networks rarely look like this. A local "
+                "antivirus, proxy or firewall is probably intercepting them."
+            )
+    return warnings
 
 
 def parse_ports(spec: str) -> list[int]:
@@ -120,7 +173,7 @@ def save_json(results, path, meta):
 
 def save_csv(results, path):
     with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["host", "ip", "port", "service", "banner"])
+        writer = csv.DictWriter(f, fieldnames=["host", "ip", "port", "service", "banner", "suspect"])
         writer.writeheader()
         writer.writerows(asdict(r) for r in results)
 
@@ -183,14 +236,21 @@ def main():
 
     results.sort(key=lambda r: (r.ip, r.port))
     elapsed = time.time() - start
+    warnings = flag_suspect_results(results, len(resolved))
 
     if results:
-        print(f"{'HOST':<20}{'PORT':<8}{'SERVICE':<14}BANNER")
+        print(f"{'HOST':<20}{'PORT':<8}{'SERVICE':<14}{'BANNER'}")
         for r in results:
-            print(f"{r.ip:<20}{r.port:<8}{r.service:<14}{r.banner}")
+            mark = "[?] " if r.suspect else ""
+            print(f"{r.ip:<20}{r.port:<8}{r.service:<14}{mark}{r.banner}")
     else:
         print("No open ports found.")
     print(f"\nDone: {len(results)} open port(s) in {elapsed:.2f}s")
+    if warnings:
+        print("\n[!] Possible false positives ([?] = suspect):")
+        for w in warnings:
+            print(f"    - {w}")
+        print("    Tip: scan other ports, pause the mail shield, or lower -w.")
 
     meta = {
         "scanned_at": datetime.now().isoformat(timespec="seconds"),
