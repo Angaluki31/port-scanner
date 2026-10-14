@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Python Port Scanner
 
 A fast, multithreaded TCP port scanner written in Python. Built to learn how
@@ -45,3 +46,6 @@ scanning may be illegal.
 - UDP scanning
 - Async version with `asyncio`
 - Simple GUI
+=======
+# port-scanner
+>>>>>>> d8a4f43257bf5985add00d234bec0d36f1d57358
